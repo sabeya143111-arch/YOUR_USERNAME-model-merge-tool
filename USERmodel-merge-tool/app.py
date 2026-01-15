@@ -1,119 +1,151 @@
-# app.py  –  Streamlit Excel MODEL merge tool
+# app.py – Smart Streamlit Excel MODEL merge tool
 
 import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-st.set_page_config(page_title="Model Merge Tool", layout="wide")
-
-st.title("📊 Model Quantity Merger")
-st.write(
-    "Same MODEL / STYLE ki multiple quantities ko merge karo, "
-    "total amount aur unit price automatically calculate ho jayega."
+# ---------- Page config ----------
+st.set_page_config(
+    page_title="Model Merge Tool",
+    layout="wide",
+    page_icon="📊",
 )
 
+# ---------- Header ----------
+st.markdown(
+    """
+    <style>
+    .big-title {font-size: 30px; font-weight: 700;}
+    .sub {color: #555; font-size: 14px;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown('<p class="big-title">📊 Model / Style Quantity Merger</p>', unsafe_allow_html=True)
+st.markdown(
+    '<p class="sub">Upload any Excel with MODEL / STYLE and QTY / AMOUNT columns. '
+    'App will auto-detect columns, merge duplicates, and calculate unit price.</p>',
+    unsafe_allow_html=True,
+)
 st.markdown("---")
 
-# 1) File upload
+# ---------- Helper: smart column detection ----------
+def detect_column(df_cols, keywords):
+    """
+    df_cols: list of uppercase column names
+    keywords: list of strings to search
+    returns first matching column or None
+    """
+    for key in keywords:
+        for col in df_cols:
+            if key in col:
+                return col
+    return None
+
+# ---------- File upload ----------
 uploaded_file = st.file_uploader("Excel file upload karo (.xlsx)", type=["xlsx"])
 
 if uploaded_file is not None:
-    # 2) Read Excel
+    # Read Excel
     try:
         df = pd.read_excel(uploaded_file)
     except Exception as e:
         st.error(f"File read error: {e}")
         st.stop()
 
-    st.subheader("Original data (top 10 rows)")
-    st.dataframe(df.head(10))
+    st.success(f"File loaded: **{uploaded_file.name}**")
+    st.write(f"Total rows: **{len(df)}**")
 
-    # 3) Normalize column names
+    # Show preview
+    with st.expander("🔍 Original data preview (top 15 rows)", expanded=False):
+        st.dataframe(df.head(15), use_container_width=True)
+
+    # Normalize column names
+    df_original_cols = df.columns.copy()
     df.columns = df.columns.str.strip().str.upper()
 
-    # Auto-detect MODEL / STYLE column
-    model_col = None
-    for col in df.columns:
-        if "MODEL" in col or "STYLE" in col:
-            model_col = col
-            break
+    cols = list(df.columns)
 
-    # Auto-detect QTY column
-    qty_col = None
-    for col in df.columns:
-        if "QTY" in col or "QUANTITY" in col:
-            qty_col = col
-            break
+    # Auto-detect columns
+    auto_model_col = detect_column(cols, ["MODEL", "STYLE", "ITEM", "CODE"])
+    auto_qty_col = detect_column(cols, ["QTY", "QUANTITY", "PCS", "QTY/PCS"])
+    auto_amount_col = detect_column(cols, ["AMOUNT", "TOTAL", "VALUE", "AMT"])
 
-    # Auto-detect AMOUNT column
-    amount_col = None
-    for col in df.columns:
-        if "AMOUNT" in col or "TOTAL" in col:
-            amount_col = col
-            break
+    # ---------- Sidebar: settings ----------
+    st.sidebar.header("⚙️ Settings")
 
-    if not model_col or not qty_col or not amount_col:
-        st.error(
-            "MODEL / QTY / AMOUNT columns automatically detect nahi ho paaye. "
-            "Please ensure column names me in words ka use ho."
-        )
-        st.stop()
+    st.sidebar.write("**Column selection** (auto-detected, but you can change):")
+    model_col = st.sidebar.selectbox("Model / Style column", options=cols, index=cols.index(auto_model_col) if auto_model_col in cols else 0)
+    qty_col = st.sidebar.selectbox("Quantity column", options=cols, index=cols.index(auto_qty_col) if auto_qty_col in cols else 0)
+    amount_col = st.sidebar.selectbox("Amount column", options=cols, index=cols.index(auto_amount_col) if auto_amount_col in cols else 0)
 
-    st.markdown("### Detected columns")
-    st.write(f"**MODEL column:** {model_col}")
-    st.write(f"**QTY column:** {qty_col}")
-    st.write(f"**AMOUNT column:** {amount_col}")
+    st.sidebar.markdown("---")
+    st.sidebar.write("**Result options**:")
 
-    # 4) Clean MODEL: trim, blanks fill
-    df[model_col] = df[model_col].astype(str).str.strip()
-    df[model_col] = df[model_col].replace(["", "nan", "NaN", "NONE", "None"], pd.NA)
-    # Forward fill: neeche blank MODEL ko upar wali value de do
-    df[model_col] = df[model_col].fillna(method="ffill")
+    min_qty_filter = st.sidebar.number_input("Minimum Total_QTY to keep", value=0, min_value=0, step=1)
+    sort_option = st.sidebar.selectbox("Sort result by", options=["MODEL", "Total_QTY", "Total_Amount", "Unit_Price"])
 
-    # 5) Convert QTY & AMOUNT to numeric
-    df[qty_col] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0)
-    df[amount_col] = pd.to_numeric(df[amount_col], errors="coerce").fillna(0)
+    st.sidebar.markdown("---")
+    search_text = st.sidebar.text_input("Filter by model name (contains)", value="")
 
-    st.subheader("Cleaned data sample")
-    st.dataframe(df[[model_col, qty_col, amount_col]].head(10))
+    # ---------- Cleaning ----------
+    working_df = df.copy()
 
-    # 6) Group by MODEL and sum
+    # Clean model
+    working_df[model_col] = working_df[model_col].astype(str).str.strip()
+    working_df[model_col] = working_df[model_col].replace(["", "nan", "NaN", "NONE", "None"], pd.NA)
+    working_df[model_col] = working_df[model_col].fillna(method="ffill")
+
+    # Numeric
+    working_df[qty_col] = pd.to_numeric(working_df[qty_col], errors="coerce").fillna(0)
+    working_df[amount_col] = pd.to_numeric(working_df[amount_col], errors="coerce").fillna(0)
+
+    # ---------- Grouping ----------
     grouped = (
-        df.groupby(model_col, as_index=False)
-          .agg({qty_col: "sum", amount_col: "sum"})
+        working_df.groupby(model_col, as_index=False)
+        .agg({qty_col: "sum", amount_col: "sum"})
     )
-
-    # Rename columns
     grouped.columns = ["MODEL", "Total_QTY", "Total_Amount"]
-
-    # 7) Calculate Unit Price
     grouped["Unit_Price"] = (grouped["Total_Amount"] / grouped["Total_QTY"]).round(2)
 
-    # Sort by model
-    grouped = grouped.sort_values("MODEL").reset_index(drop=True)
+    # Apply filters
+    if min_qty_filter > 0:
+        grouped = grouped[grouped["Total_QTY"] >= min_qty_filter]
 
-    st.markdown("### Merged result")
-    st.dataframe(grouped)
+    if search_text:
+        grouped = grouped[grouped["MODEL"].str.contains(search_text, case=False, na=False)]
 
-    # Summary
-    st.info(
-        f"Total models: **{len(grouped)}**, "
-        f"Total QTY: **{int(grouped['Total_QTY'].sum())}**, "
-        f"Total Amount: **{grouped['Total_Amount'].sum():,.2f}**"
-    )
+    # Sort
+    grouped = grouped.sort_values(sort_option).reset_index(drop=True)
 
-    # 8) Prepare Excel for download
+    # ---------- Display result ----------
+    st.markdown("### ✅ Merged result")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Models", len(grouped))
+    with col2:
+        st.metric("Total QTY", int(grouped["Total_QTY"].sum()))
+    with col3:
+        st.metric("Total Amount", f"{grouped['Total_Amount'].sum():,.2f}")
+
+    st.dataframe(grouped, use_container_width=True, height=450)
+
+    # ---------- Download Excel ----------
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         grouped.to_excel(writer, index=False, sheet_name="Merged Data")
     excel_data = output.getvalue()
 
-    st.markdown("### Download")
+    st.markdown("### ⬇️ Download")
     st.download_button(
-        label="⬇️ Download merged Excel",
+        label="Download merged Excel",
         data=excel_data,
         file_name="Model_Merged_Final.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
     )
+
 else:
-    st.info("Upar se Excel (.xlsx) file upload karo, phir result yahan show hoga.")
+    st.info("Start karne ke liye upar se koi bhi related Excel (.xlsx) upload karo.")
