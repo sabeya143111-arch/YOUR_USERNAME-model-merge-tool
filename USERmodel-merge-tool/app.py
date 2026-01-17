@@ -1,4 +1,4 @@
-# app.py – Professional Streamlit Invoice Model Merger
+# app.py – Professional Streamlit Invoice Model Merger (FIXED)
 
 import streamlit as st
 import pandas as pd
@@ -6,7 +6,6 @@ from io import BytesIO
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-# ---------- Page config ----------
 st.set_page_config(
     page_title="Invoice Processor",
     layout="wide",
@@ -14,7 +13,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---------- Custom CSS ----------
 st.markdown(
     """
     <style>
@@ -46,14 +44,12 @@ st.markdown(
 st.markdown('<p class="main-title">📦 Invoice Model Merger</p>', unsafe_allow_html=True)
 st.markdown(
     '<p class="subtitle">Koi bhi invoice Excel upload karo. App MODEL ke hisaab se '
-    'duplicate rows merge karega, saare columns safe rahenge, aur professional Excel '
-    'output dega.</p>',
+    'duplicate rows merge karega, aur professional Excel output dega.</p>',
     unsafe_allow_html=True,
 )
 st.markdown("---")
 
 
-# ---------- Helper: detect column ----------
 def detect_column(df_cols, keywords):
     """Try to find a column whose name contains any of the given keywords."""
     df_cols_upper = [str(c).upper() for c in df_cols]
@@ -65,13 +61,11 @@ def detect_column(df_cols, keywords):
     return None
 
 
-# ---------- Main app ----------
 uploaded_file = st.file_uploader(
     "Upload your invoice Excel (.xlsx)", type=["xlsx"]
 )
 
 if uploaded_file is not None:
-    # 1) Read Excel
     try:
         df = pd.read_excel(uploaded_file)
     except Exception as e:
@@ -87,10 +81,9 @@ if uploaded_file is not None:
     with st.expander("🔍 Preview: Original data (first 10 rows)", expanded=False):
         st.dataframe(df.head(10), use_container_width=True)
 
-    # 2) Column names
     original_cols = df.columns.copy()
 
-    # 3) Auto-detect important columns (use original names)
+    # Auto-detect important columns
     model_col = detect_column(original_cols, ["MODEL", "STYLE", "ITEM", "CODE"])
     qty_col = detect_column(original_cols, ["QTY", "QUANTITY", "PCS"])
     price_col = detect_column(original_cols, ["PRICE", "U.PRICE", "UNIT"])
@@ -100,7 +93,7 @@ if uploaded_file is not None:
         st.error("❌ MODEL / STYLE column nahi mil raha! Column naam check karo.")
         st.stop()
 
-    # ---------- Sidebar ----------
+    # Sidebar
     st.sidebar.header("⚙️ Settings")
     st.sidebar.write("**Detected columns:**")
     st.sidebar.info(
@@ -121,7 +114,7 @@ if uploaded_file is not None:
         sort_by_options.append("Total_Amount")
     sort_by = st.sidebar.selectbox("Sort by", options=sort_by_options, index=0)
 
-    # 4) Clean data
+    # Clean data
     working_df = df.copy()
 
     # Clean MODEL column
@@ -145,7 +138,7 @@ if uploaded_file is not None:
             working_df[amount_col], errors="coerce"
         ).fillna(0)
 
-    # 5) Groupby MODEL – sum QTY, AMOUNT; keep first of others
+    # Groupby MODEL – sum QTY, AMOUNT; keep first of others
     agg_dict = {}
     if qty_col:
         agg_dict[qty_col] = "sum"
@@ -158,16 +151,26 @@ if uploaded_file is not None:
         if col != model_col and col not in agg_dict:
             agg_dict[col] = "first"
 
-    grouped = working_df.groupby(model_col, as_index=False).agg(agg_dict)  # [web:47]
+    grouped = working_df.groupby(model_col, as_index=False).agg(agg_dict)
 
-    # 6) Helper columns for display
+    # ============ FIX: Rename original columns ONLY for Excel export ============
+    final_export_df = grouped.copy()
+    
+    if qty_col:
+        final_export_df = final_export_df.rename(columns={qty_col: "Total_QTY"})
+    if price_col:
+        final_export_df = final_export_df.rename(columns={price_col: "Unit_Price"})
+    if amount_col:
+        final_export_df = final_export_df.rename(columns={amount_col: "Total_Amount"})
+
+    # For display/filtering, keep original names + add helper columns
     display_df = grouped.copy()
     if qty_col:
         display_df["Total_QTY"] = display_df[qty_col]
     if amount_col:
         display_df["Total_Amount"] = display_df[amount_col]
 
-    # 7) Filters
+    # Filters
     if min_qty > 0 and qty_col:
         display_df = display_df[display_df["Total_QTY"] >= min_qty]
 
@@ -178,7 +181,7 @@ if uploaded_file is not None:
             .str.contains(search_model, case=False, na=False)
         ]
 
-    # 8) Sorting
+    # Sorting
     if sort_by == "Total_QTY" and qty_col:
         sort_col = "Total_QTY"
         ascending = False
@@ -193,7 +196,46 @@ if uploaded_file is not None:
         drop=True
     )
 
-    # 9) Metrics + table
+    # Update final_export_df with same filters + sorting
+    final_export_df = grouped.copy()
+    if qty_col:
+        final_export_df["Total_QTY"] = final_export_df[qty_col]
+    if price_col:
+        final_export_df["Unit_Price"] = final_export_df[price_col]
+    if amount_col:
+        final_export_df["Total_Amount"] = final_export_df[amount_col]
+    
+    # Apply filters to export
+    if min_qty > 0 and qty_col:
+        final_export_df = final_export_df[final_export_df["Total_QTY"] >= min_qty]
+    
+    if search_model:
+        final_export_df = final_export_df[
+            final_export_df[model_col]
+            .astype(str)
+            .str.contains(search_model, case=False, na=False)
+        ]
+    
+    # Sort export
+    if sort_by == "Total_QTY" and qty_col:
+        final_export_df = final_export_df.sort_values("Total_QTY", ascending=False)
+    elif sort_by == "Total_Amount" and amount_col:
+        final_export_df = final_export_df.sort_values("Total_Amount", ascending=False)
+    else:
+        final_export_df = final_export_df.sort_values(model_col, ascending=True)
+    
+    # Select only needed columns for export
+    export_cols = [model_col]
+    if qty_col:
+        export_cols.append("Total_QTY")
+    if price_col:
+        export_cols.append("Unit_Price")
+    if amount_col:
+        export_cols.append("Total_Amount")
+    
+    final_export_df = final_export_df[export_cols].reset_index(drop=True)
+
+    # Metrics + table (display for user)
     st.markdown("### ✅ Merged Result")
 
     c1, c2, c3 = st.columns(3)
@@ -211,10 +253,10 @@ if uploaded_file is not None:
 
     st.dataframe(display_df, use_container_width=True, height=400)
 
-    # 10) Excel export
+    # Excel export (clean version only)
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        display_df.to_excel(writer, sheet_name="Merged Data", index=False)
+        final_export_df.to_excel(writer, sheet_name="Merged Data", index=False)
 
         ws = writer.sheets["Merged Data"]
 
